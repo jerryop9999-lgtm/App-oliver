@@ -1,8 +1,13 @@
 package com.oliver.multiapp
 
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Bundle
+import android.os.UserManager
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -12,11 +17,17 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var grid: GridView
+    private lateinit var content: LinearLayout
+
+    private val dpm by lazy { getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager }
+
+    // true when this copy of the app is running INSIDE the Clone Space (work profile)
+    private val inClone: Boolean get() = dpm.isProfileOwnerApp(packageName)
 
     private class Item(val label: String, val icon: Drawable)
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
 
     private inner class IconAdapter(val items: List<Item>, val asGrid: Boolean) : BaseAdapter() {
         override fun getCount() = items.size
@@ -45,9 +56,8 @@ class MainActivity : AppCompatActivity() {
 
     private val pickApk = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
-        val pkg = AppEngine.importApk(this, uri)
-        Toast.makeText(this, pkg ?: "Invalid APK", Toast.LENGTH_SHORT).show()
-        refresh()
+        val path = AppEngine.copyApk(this, uri)
+        if (path == null) toast("Invalid APK") else AppEngine.installApk(this, path)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,53 +77,99 @@ class MainActivity : AppCompatActivity() {
         root.addView(ImageView(this).apply { setImageResource(R.drawable.logo) },
             LinearLayout.LayoutParams(300, 300).apply { gravity = Gravity.CENTER_HORIZONTAL })
 
-        fun btn(t: String, a: () -> Unit) = Button(this).apply {
-            text = t
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFFB00000.toInt())
-            setOnClickListener { a() }
-        }
-        root.addView(btn("Add App") { showInstalled() })
-        root.addView(btn("Import APK") { pickApk.launch(arrayOf("application/vnd.android.package-archive")) })
-
-        grid = GridView(this).apply { numColumns = 3 }
-        root.addView(grid)
+        content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(content)
 
         frame.addView(root)
         setContentView(frame)
-        refresh()
     }
 
-    private fun refresh() {
-        val entries = AppEngine.list(this)
-        val items = entries.map {
-            val name = AppEngine.label(this, it)
-            Item(if (it.instance == 0) name else "$name (Clone ${it.instance})", AppEngine.icon(this, it))
+    override fun onResume() {
+        super.onResume()
+        content.removeAllViews()
+        if (inClone) renderClone() else renderMain()
+    }
+
+    private fun btn(t: String, a: () -> Unit) = Button(this).apply {
+        text = t
+        setTextColor(0xFFFFFFFF.toInt())
+        setBackgroundColor(0xFFB00000.toInt())
+        setOnClickListener { a() }
+    }
+
+    private fun info(t: String) = TextView(this).apply {
+        text = t
+        setTextColor(0xFFFFFFFF.toInt())
+        textSize = 15f
+        setPadding(0, dp(12), 0, dp(12))
+    }
+
+    // ---------- Normal (main) profile ----------
+    private fun renderMain() {
+        val um = getSystemService(Context.USER_SERVICE) as UserManager
+        val hasClone = um.userProfiles.size > 1
+        if (hasClone) {
+            content.addView(info(
+                "Clone Space is ready.\n\nOpen \"OLIVER Multi App\" with the briefcase badge " +
+                "(your launcher's Work tab) to add apps and log in with other accounts."
+            ))
+        } else {
+            content.addView(info(
+                "Create a Clone Space: an isolated copy of Android where cloned apps " +
+                "keep their own accounts and data."
+            ))
+            content.addView(btn("Create Clone Space") { createCloneSpace() })
         }
+    }
+
+    private fun createCloneSpace() {
+        if (!dpm.isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)) {
+            toast("This phone does not allow creating a Clone Space")
+            return
+        }
+        val admin = ComponentName(this, AdminReceiver::class.java)
+        val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)
+            .putExtra(DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME, admin)
+        try { startActivity(i) } catch (e: Exception) { toast("Not supported on this phone") }
+    }
+
+    // ---------- Inside the Clone Space ----------
+    private fun launcherApps() = packageManager.queryIntentActivities(
+        Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+    ).filter { it.activityInfo.packageName != packageName }
+        .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+
+    private fun renderClone() {
+        content.addView(btn("Add App") { showCandidates() })
+        content.addView(btn("Import APK") { pickApk.launch(arrayOf("application/vnd.android.package-archive")) })
+
+        val pm = packageManager
+        val apps = launcherApps()
+        val items = apps.map { Item(it.loadLabel(pm).toString(), it.loadIcon(pm)) }
+        val grid = GridView(this).apply { numColumns = 3 }
         grid.adapter = IconAdapter(items, true)
         grid.setOnItemClickListener { _, _, i, _ ->
-            val e = entries[i]
+            val pkg = apps[i].activityInfo.packageName
             AlertDialog.Builder(this).setTitle(items[i].label)
-                .setItems(arrayOf("Open", "Clone App", "Remove")) { _, w ->
-                    when (w) {
-                        0 -> AppEngine.launch(this, e)
-                        1 -> { AppEngine.add(this, e.pkg); refresh() }
-                        2 -> { AppEngine.remove(this, e); refresh() }
-                    }
+                .setItems(arrayOf("Open", "Uninstall from Clone Space")) { _, w ->
+                    if (w == 0) pm.getLaunchIntentForPackage(pkg)?.let { startActivity(it) }
+                    else startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")))
                 }.show()
         }
+        content.addView(grid)
     }
 
-    private fun showInstalled() {
+    private fun showCandidates() {
         val pm = packageManager
-        val apps = pm.queryIntentActivities(
-            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
-        ).filter { it.activityInfo.packageName != packageName }
-            .sortedBy { it.loadLabel(pm).toString().lowercase() }
+        val have = launcherApps().map { it.activityInfo.packageName }.toSet()
+        val apps = AppEngine.candidates(this).filter { it.packageName !in have }
+        if (apps.isEmpty()) { toast("No apps available to add"); return }
         val items = apps.map { Item(it.loadLabel(pm).toString(), it.loadIcon(pm)) }
-        AlertDialog.Builder(this).setTitle("Add App")
+        AlertDialog.Builder(this).setTitle("Add App to Clone Space")
             .setAdapter(IconAdapter(items, false)) { _, i ->
-                AppEngine.add(this, apps[i].activityInfo.packageName); refresh()
+                val ok = AppEngine.installExisting(this, apps[i].packageName)
+                toast(if (ok) "Added: ${items[i].label}" else "Could not add this app")
+                onResume()
             }.show()
     }
 }
