@@ -109,17 +109,30 @@ class MainActivity : AppCompatActivity() {
     // ---------- Normal (main) profile ----------
     private fun renderMain() {
         val um = getSystemService(Context.USER_SERVICE) as UserManager
-        val hasClone = um.userProfiles.size > 1
-        if (hasClone) {
+        val otherProfileExists = um.userProfiles.size > 1
+        // Our own Clone Space = another profile where THIS app is installed
+        var ours = otherProfileExists && Build.VERSION.SDK_INT < 28
+        if (Build.VERSION.SDK_INT >= 28) {
+            try {
+                ours = (getSystemService("crossprofileapps") as CrossProfileApps)
+                    .targetUserProfiles.isNotEmpty()
+            } catch (e: Exception) { ours = false }
+        }
+        if (ours) {
             content.addView(info(
-                "Clone Space is ready.\n\nOpen \"OLIVER Multi App\" with the briefcase badge " +
-                "(your launcher's Work tab) to add apps and log in with other accounts."
+                "Clone Space is ready.\n\nTap Open Clone Space (or open the \"OLIVER Multi App\" " +
+                "with the briefcase badge) to add apps and log in with other accounts."
             ))
             content.addView(btn("Open Clone Space") { openCloneSpace() })
         } else {
             content.addView(info(
-                "Create a Clone Space: an isolated copy of Android where cloned apps " +
-                "keep their own accounts and data."
+                if (otherProfileExists)
+                    "This phone already has another separate space (work profile or system clone), " +
+                    "not created by this app. Android allows only one. Tap Create Clone Space; " +
+                    "if it is refused, that other space must be removed first."
+                else
+                    "Create a Clone Space: an isolated copy of Android where cloned apps " +
+                    "keep their own accounts and data."
             ))
             content.addView(btn("Create Clone Space") { createCloneSpace() })
         }
