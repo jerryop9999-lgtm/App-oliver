@@ -4,8 +4,10 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.CrossProfileApps
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.UserManager
 import android.view.Gravity
@@ -113,12 +115,28 @@ class MainActivity : AppCompatActivity() {
                 "Clone Space is ready.\n\nOpen \"OLIVER Multi App\" with the briefcase badge " +
                 "(your launcher's Work tab) to add apps and log in with other accounts."
             ))
+            content.addView(btn("Open Clone Space") { openCloneSpace() })
         } else {
             content.addView(info(
                 "Create a Clone Space: an isolated copy of Android where cloned apps " +
                 "keep their own accounts and data."
             ))
             content.addView(btn("Create Clone Space") { createCloneSpace() })
+        }
+    }
+
+    private fun openCloneSpace() {
+        if (Build.VERSION.SDK_INT < 28) {
+            toast("Open the copy with the briefcase badge from your app drawer")
+            return
+        }
+        try {
+            val cpa = getSystemService("crossprofileapps") as CrossProfileApps
+            val target = cpa.targetUserProfiles.firstOrNull()
+            if (target == null) { toast("Clone Space not found"); return }
+            cpa.startMainActivity(ComponentName(this, MainActivity::class.java), target)
+        } catch (e: Exception) {
+            toast("Could not open: ${e.message}")
         }
     }
 
